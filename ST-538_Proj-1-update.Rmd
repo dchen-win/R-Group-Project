@@ -1,0 +1,956 @@
+---
+title: "Data Wizards (Group 4) Project 1"
+author:
+- Di Chen
+- Mai Castellano
+- Tyler Kussee
+- Spencer Hutchison
+output: pdf_document
+---
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+## For your notes, an if statement for checking if a package is installed :)
+#if(!require(somepackage)){
+#    install.packages("somepackage")
+#    library(somepackage)
+#}
+
+if (!require(tidycensus)) {
+  install.packages("tidycensus")
+}
+if (!require(tidyverse)) {
+  install.packages("tidyverse")
+}
+if (!require(dplyr)) {
+  install.packages("dplyr")
+}
+if (!require(ggplot2)) {
+  install.packages("ggplot2")
+}
+if (!require(glmnet)) {
+  install.packages("glmnet")
+}
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+#Load libraries
+library(tidycensus)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(faraway)
+library(car)
+library(gridExtra)
+library(glmnet)
+
+census_api_key("2547c95ce33b1ed0eec3aafd0fd8526a5bb9a22e")
+```
+
+# Introduction
+
+The American Community Survey offers crucial insights about our country and its citizens 
+each year. The data from this survey plays a pivotal role in guiding the allocation of
+trillions of dollars in federal funding, ensuring that resources are directed where 
+they are needed most.
+
+With the data from the American Community Survey, the Data Wizards have come up 
+with the following 3 questions they would like to answer:
+
+* Does higher education mean higher income accounting for sex and age?
+* Can we predict household income based on education, occupation, and race/ethnicity?
+* Is there a relationship between race/ethnicity and home ownership?
+
+In particular, we'll be focusing on the first question to get started.
+
+## Obtain the Data
+
+In the case of the ACS dataset, we'll pull it via an API. We've already declared our key earlier, so now we just need to pull our dataset with the variables and filtering we'd like. In this case we'll want to pull our Age (AGEP), Education Level (SCHL), sex (SEX), and Total Person's Income (PINCP) while filtering to the year 2022 and the State of OR.
+
+```{r echo=FALSE, message=FALSE, results='hide'}
+#Pull data set for specific variables
+puma_data <- get_pums(variables = c("AGEP","SCHL","PINCP", "SEX", "RAC1P", "TEN", "OCCP", "MAR", "ACR")
+                      ,state = "OR"
+                      ,year = 2022)
+```
+
+## Scrub the data
+
+In the data cleaning process, we began by assigning more descriptive column names to enhance clarity. Columns such as "ST", "Serial Number", and "housing weight" were removed as they were deemed unnecessary for our analysis, while "PersonNumber" was retained for potential future use. Subsequently, we converted instances of "bb" in the Education level, "bbbb"/"000N" in the Occupation, and "b" in Homeownership columns to 0, followed by transformation of all 3 columns into numeric values. 
+
+Groupings were then created based on education levels, ranging from "No Education" to "Doctoral Degree". Additional groupings were generated based on Occupation values, resulting in specific industries/positions to get classified. The column order was rearranged for better organization. 
+
+As our focus is on income, individuals under the age of 14 were excluded from the dataset, aligning with Oregon's legal working age. Variable codes were converted to their corresponding descriptions, starting with Education Level. Lastly, we identified the genders present in the dataset to facilitate further analysis. This systematic approach ensures that the data is cleaned and structured appropriately for subsequent analysis.
+
+```{r, error=TRUE, collapse=TRUE, warning=FALSE, echo=FALSE, results='hide'}
+#Rename the columns
+puma_data <- puma_data %>% dplyr::rename(Age = AGEP,
+                                  EducationLevel = SCHL,
+                                  Income = PINCP,
+                                  Sex = SEX,
+                                  PersonNumber = SPORDER,
+                                  Race = RAC1P,
+                                  Homeownership = TEN,
+                                  Occupation = OCCP,
+                                  MaritalStatus = MAR,
+                                  HouseAcreage = ACR
+                                  )
+head(puma_data[, 2:8])
+```
+
+```{r, error=TRUE, collapse=TRUE, warning=FALSE, echo=FALSE, results='hide'}
+#Remove columns that are not needed
+puma_data <- puma_data %>% 
+  select(-ST, -SERIALNO, -WGTP, -PWGTP)
+head(puma_data)
+```
+
+```{r, message=FALSE, echo=FALSE, results='hide'}
+#Convert education levels
+puma_data <- puma_data %>%
+  mutate(
+    EducationLevel = case_when(
+      EducationLevel == "bb" ~ "00",
+      TRUE ~ EducationLevel
+    ),
+    EducationLevel = as.numeric(EducationLevel)
+  )
+
+#Make sure it is numeric
+class(puma_data$EducationLevel)
+```
+
+```{r, message=FALSE, echo=FALSE, results='hide'}
+#Convert Occupation to numerical
+puma_data <- puma_data %>%
+  mutate(
+    Occupation = case_when(
+      Occupation == "bbbb" ~ "0000",
+      Occupation == "000N" ~ "0000",
+      TRUE ~ Occupation
+    ),
+    Occupation = as.numeric(Occupation)
+  )
+
+#Make sure it is numeric
+class(puma_data$Occupation)
+```
+
+```{r, message=FALSE, echo=FALSE, results='hide'}
+#Convert homeownership
+puma_data <- puma_data %>%
+  mutate(
+    Homeownership = case_when(
+      Homeownership == "b" ~ "0",
+      TRUE ~ Homeownership
+    ),
+    Homeownership = as.numeric(Homeownership)
+  )
+
+#Make sure it is numeric
+class(puma_data$Homeownership)
+```
+
+```{r}
+#Convert HouseAcreage
+puma_data <- puma_data %>%
+  mutate(
+    HouseAcreage = case_when(
+      HouseAcreage == "b" ~ "0",
+      TRUE ~ HouseAcreage
+    ),
+    HouseAcreage = as.numeric(HouseAcreage)
+  )
+
+#Make sure it is numeric
+class(puma_data$HouseAcreage)
+```
+
+```{r, message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+##Group education level
+puma_data <- puma_data %>%
+  mutate(
+     EducationGroup = cut(EducationLevel, breaks = c(0, 16, 21, 22, Inf),
+                         labels = c("Less than HS", "HS, GED, or Associates Degree",
+                                    "Bachelors Degree", "Masters Degree or higher"),
+                         right = FALSE)
+  )
+unique(puma_data$EducationGroup)
+puma_data[1:50,]
+```
+
+```{r, message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+#Drop age below 14
+puma_data <- puma_data %>%
+  filter(Age >= 14)
+head(puma_data[puma_data$Age < 14,])
+
+
+#Drop income that are less than 1 from the data set
+#Drop observation with 0 and negative income
+puma_data <- puma_data %>% filter(Income >= 1)
+head(puma_data)
+sum(puma_data$Income<1)
+```
+
+```{r, error=TRUE, collapse=TRUE, warning=FALSE, echo=FALSE, results='hide'}
+#relabeling race
+puma_data <- puma_data %>%
+  mutate(
+    Race = case_when(
+      Race == "1" ~ "White",
+      Race == "2" ~ "Black or African American",
+      Race == "3" ~ "American Indian",
+      Race == "4" ~ "Alaska Native",
+      Race == "5" ~ "Native American Not Specified",
+      Race == "6" ~ "Asian",
+      Race == "7" ~ "Native Hawaiian or Other Pacific Islander",
+      Race == "8" ~ "Other Race",
+      Race == "9" ~ "Two or More Races",
+      TRUE ~ as.character(Race)
+    )
+)
+puma_data$Race[1:100]
+```
+
+```{r}
+#relabeling MaritalStatus
+puma_data <- puma_data %>%
+  mutate(
+    MaritalStatus = case_when(
+      MaritalStatus == "1" ~ "Married",
+      MaritalStatus == "2" ~ "Widowed",
+      MaritalStatus == "3" ~ "Divorced",
+      MaritalStatus == "4" ~ "Separated",
+      MaritalStatus == "5" ~ "Not Married/Under 15",
+      TRUE ~ as.character(MaritalStatus)
+    )
+)
+
+#Checking labels are assigned.
+unique(puma_data$MaritalStatus)
+puma_data$MaritalStatus[11200:11300]
+```
+
+```{r}
+#relabeling Acreage
+puma_data <- puma_data %>%
+  mutate(
+    HouseAcreage = case_when(
+      HouseAcreage == 0 ~ "Not a one-family home",
+      HouseAcreage == 1 ~ "< 1 Acre",
+      HouseAcreage == 2 ~ "1 - 10 Acres",
+      HouseAcreage == 3 ~ "> 10 Acres",
+      TRUE ~ as.character(HouseAcreage)
+    )
+)
+
+#Checking labels are assigned.
+unique(puma_data$HouseAcreage)
+puma_data$HouseAcreage[1200:1300]
+```
+
+```{r, error=TRUE, collapse=TRUE, warning=FALSE, echo=FALSE, results='hide'}
+#relabeling tenure
+puma_data <- puma_data %>%
+  mutate(
+    Homeownership = case_when(
+      Homeownership == 0 ~ "N/A",
+      Homeownership == 1 ~ "Owned with mortgage or loan",
+      Homeownership == 2 ~ "Owned free and clear",
+      Homeownership == 3 ~ "Rented",
+      Homeownership == 4 ~ "Occupied without payment of rent",
+      TRUE ~ as.character(Homeownership)
+    )
+)
+
+#Checking labels are assigned.
+unique(puma_data$Homeownership)
+puma_data$Homeownership[11200:11300]
+```
+
+
+```{r, error=TRUE, collapse=TRUE, warning=FALSE, echo=FALSE, results='hide'}
+#Identify gender
+puma_data <- puma_data %>%
+  mutate(
+    Sex = case_when(
+      Sex == 1 ~ "Male",
+      Sex == 2 ~ "Female",
+      TRUE ~ as.character(Sex)
+    )
+)
+
+#Checking labels are assigned.
+unique(puma_data$Sex)
+head(puma_data$Sex)
+```
+
+```{r, error=TRUE, collapse=TRUE, warning=FALSE, echo=FALSE, results='hide'}
+#Occupation Grouping
+puma_data <- puma_data %>%
+  mutate(
+    OccupationGroup = case_when(
+      between(as.numeric(Occupation), 0000, 0009) ~ "Less than 16 years old",
+      between(as.numeric(Occupation), 0010, 0440) ~ "Management",
+      between(as.numeric(Occupation), 0500, 0960) ~ "Business/Finance",
+      between(as.numeric(Occupation), 1000, 1240) ~ "CS/Math/Statistics",
+      between(as.numeric(Occupation), 1300, 1560) ~ "Engineering/Architecture",
+      between(as.numeric(Occupation), 1600, 1980) ~ "Science/Economics",
+      between(as.numeric(Occupation), 2000, 2060) ~ "Social/Therapy/Religious",
+      between(as.numeric(Occupation), 2100, 2180) ~ "Legal",
+      between(as.numeric(Occupation), 2200, 2555) ~ "Education/Library",
+      between(as.numeric(Occupation), 2600, 2920) ~ "Entertainment/Arts/Media/Sports",
+      between(as.numeric(Occupation), 3000, 3550) ~ "Medical",
+      between(as.numeric(Occupation), 3600, 3655) ~ "Health",
+      between(as.numeric(Occupation), 3700, 3960) ~ "Protective/Essential",
+      between(as.numeric(Occupation), 4000, 4160) ~ "Food",
+      between(as.numeric(Occupation), 4200, 4255) ~ "Sanitation/Groundskeeping",
+      between(as.numeric(Occupation), 4300, 4655) ~ "Personal/Lifestyle",
+      between(as.numeric(Occupation), 4700, 4965) ~ "Sales",
+      between(as.numeric(Occupation), 5000, 5940) ~ "Office/Administrative",
+      between(as.numeric(Occupation), 6005, 6130) ~ "Farming/Fishing/Forestry",
+      between(as.numeric(Occupation), 6200, 6765) ~ "Construction",
+      between(as.numeric(Occupation), 6800, 6950) ~ "BlueCollar",
+      between(as.numeric(Occupation), 7000, 7640) ~ "Repairs/Mechanics",
+      between(as.numeric(Occupation), 7700, 8990) ~ "Manufacturing",
+      between(as.numeric(Occupation), 9005, 9760) ~ "Transportation",
+      between(as.numeric(Occupation), 9800, 9830) ~ "Military",
+      TRUE ~ "Not Classified"
+    )
+  )
+
+#Checking labels are assigned.
+unique(puma_data$OccupationGroup)
+head(puma_data$OccupationGroup)
+```
+```{r}
+puma_data_raw <- puma_data
+head(puma_data_raw)
+```
+
+```{r, error=TRUE, collapse=TRUE, warning=FALSE, echo=FALSE, results='hide'}
+#Rearrange the columns
+puma_data <- puma_data_raw %>%
+  select(EducationGroup, EducationLevel, OccupationGroup, Occupation, Income, Age, Sex, Race, Homeownership, PersonNumber)
+head(puma_data)
+```
+
+With the data mostly cleaned up, we can now explore the data.
+
+## Explore the data
+
+We want to get a sense for the data that we'll be working with so first we'll find the range of ages that we have in our dataset. This shows that our mean and median age is very close together (50.99 and 51 respectively) showing a good distribution of ages; with a max age of 95. Education level has a similar mean and median (16.31, and 18 respectively), and it gives us a good way to  picture our distribution as well.  Unlike our age distribution the income mean and median are a bit off (50,432 and 33,700 respectively). This is something we may need to look into more in a graphical view. We also review a table of the levels of education and the their counts.
+
+For Homeownership the the distribution is very interesting with 68% of the sample owning a home either free and clear or though a mortgage. Renters make up a quarter of the sample and the rest may be cleaned up in later sections of the report. As for race 82% of this sample are White alone. The next three largest categories are Two Or More Races, Asian alone, and Some other race alone. This will make for some more difficult predictions.
+
+```{r, error=TRUE, collapse=TRUE, warning=FALSE, echo=FALSE, results='hide'}
+#Summarizing the ranges of numerical 
+summary(puma_data$Age) #Range of Age
+summary(puma_data$Income) #Range of Age
+summary(puma_data$EducationLevel) #Range of Education
+table(puma_data$EducationGroup) #Count of each level of education
+table(puma_data$Race) #Count of each race
+table(puma_data$Homeownership) #Count of each Homeownership
+table(puma_data$OccupationGroup) #Count of each Occupationgroup
+```
+
+Next we'll take a look into the income distribution in a graphical view. For this view we will also remove those that are below 0. This allows us to see a very long tailed view of the income distribution for our dataset. Our mean being the tallest point in the graph being around that $21,000 we saw in our exploration. Related to this is the variable occupation groups. These are a little difficult to decipher because there are three categories that are very general that take up 31% of the total working population and those are Management, Office/Admin and Sales. These are broad groups, but hopefully with the other categories and variables we will be able to create a model that will effectively utilize these occupation groups.
+
+```{r, error=TRUE, collapse=TRUE, warning=FALSE, echo=FALSE, results='hide'}
+#Plot income distribution
+ggplot(puma_data %>% filter(Income > 0), aes(Income)) +
+  geom_histogram(binwidth = 10000) +
+  scale_x_continuous(labels = function(x) paste0(x / 1000, "K")) +
+  labs(title = "Income Distribution in Oregon"
+       , x = "Income by $10k"
+       , y = "Count of Individuals") +
+  theme_minimal()
+```
+
+[Reference on Variables for now](https://usa.ipums.org/usa/resources/codebooks/DataDict1822.pdf)
+
+## Model the data
+
+
+We compared two regression models: the first model included EducationGroup, Sex, and Age as explanatory variables, while the second model extended to incorporate an interaction between Sex and Age. ANOVA comparisons between the full and nested models provided compelling evidence that the latter, which accounted for the interaction term, was a better fit (Analysis of variance, p < 0.00001). However, subsequent examination of model diagnostics revealed a violation of the linearity assumption. To address this issue, we transformed the response variable using a logarithmic function.
+
+Upon visualizing the model diagnostics, we observed that, while the plot of fitted values versus residuals generally centered around zero, there was a change in clustering pattern around a certain fitted value and QQ plot shows deviation from normality. Furthermore, Cook's distance indicated the presence of outliers, which were subsequently identified as influential. By fitting another model without these influential observations, we observed an improvement in the regression model, with the adjusted R-squared increasing from 0.1758 to 0.2313, while the coefficients remained significant. Additionally, the model without outliers demonstrated improved normality, as evidenced by the normal QQ plot. The residual versus fitted plot displayed a cloud of observations with a constant gap between each cluster, though they were symmetrically distributed around the y=0 line. Therefore, the assumptions of linearity, constant variance, and normality were satisfied.
+
+Further examination of the Variance Inflation Factor (VIF) values revealed multicollinearity issues, particularly with the Sex and Sex:Age variables, which exhibited VIF values of 8.46 and 9.14, respectively. To address this, we employed Ridge regression to fit the model. Using 10-fold cross-validation, we determined the optimal lambda value to be $\lambda=0.04258514$. The resulting regression model is provided below:
+
+```{r, message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+# Does higher education mean higher income accounting for sex and age?
+model_1 <- lm(Income ~ EducationGroup + Sex + Age, data = puma_data)
+model_2 <- lm(Income ~ EducationGroup + Sex * Age, data = puma_data)
+
+#Compare model 1 and 2
+anova(model_1, model_2)
+
+#The full model provides a significantly better fit.
+```
+
+
+
+```{r, message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+#Linearity and Homoscedasticity assumption
+plot(fitted(model_2), residuals(model_2))
+
+#Normality assumption
+qqnorm(residuals(model_2))
+qqline(residuals(model_2))
+
+#Independence assumptions
+plot(residuals(model_2))
+
+#Fitted vs residuals plot exhibiting pattern
+```
+
+
+```{r, message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+#Logged models
+model_3 <- lm(log(Income) ~ EducationGroup + Sex + Age, data = puma_data, na.action = na.exclude)
+model_4 <- lm(log(Income) ~ EducationGroup + Sex * Age, data = puma_data, na.action = na.exclude)
+
+#Compare models 3 and 4
+anova(model_3, model_4)
+
+#Model 4 is the best from 2 models
+```
+```{r, message=FALSE, echo=FALSE, results='hide', warning=FALSE, fig.show='hide'}
+#Linear regression assumption
+plot(fitted(model_4), residuals(model_4))
+
+#Normality assumption
+qqnorm(residuals(model_4))
+qqline(residuals(model_4))
+
+#Independence assumptions
+plot(residuals(model_4))
+```
+
+```{r, message=FALSE, echo=FALSE, results='hide', warning=FALSE, fig.show='hide'}
+#Add observation ID
+puma_data$ID <- 1:nrow(puma_data)
+
+## Attaching the Case Influence Statistics with the Data
+Data <- fortify(model_4, puma_data)
+
+## Plot the Case Influence Statistics for each observation (subject)
+par(mfrow=c(1,3))
+qplot(ID,.hat, data = Data)
+qplot(ID,.stdresid, data = Data)
+qplot(ID,.cooksd, data = Data)
+
+#There is evidence of outliers
+```
+
+
+```{r, message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+#Test for influential observations
+#Cut off point is 4/(n-k-2)
+cutoff <- 4/((nrow(puma_data)-length(model_4$coefficients)-2))
+
+#Calculate Cook's distance
+cook.d <- cooks.distance(model_4)
+```
+
+```{r, message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+#Plot to identify observation with Cook's distance higher than cutoff
+plot(cook.d, pch=".", cex=2, main="Influential Obs by Cooks distance")  # plot cook's distance
+abline(h = cutoff, col="red")  # add cutoff line
+text(x=1:length(cook.d)+1, y=cook.d, labels=ifelse(cook.d>cutoff, names(cook.d),""), col="red")  # add labels
+```
+
+```{r, message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+# Removing Outliers
+# influential row numbers
+influential <- as.numeric(names(cook.d)[(cook.d > cutoff)])
+
+#Create another data frame without influential observations
+puma_data_2 <- puma_data[-influential, ]
+
+#Fit a regression without influential
+model_5 <- lm(log(Income) ~ EducationGroup + Sex * Age, data = puma_data_2, na.action = na.exclude)
+
+#Compare the summary before and after removing outliers
+summary(model_4)
+summary(model_5)
+```
+```{r, message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+par(mfrow=c(2,2))
+#Linear regression assumption
+plot(fitted(model_5), residuals(model_5))
+
+#Normality assumption
+qqnorm(residuals(model_5))
+qqline(residuals(model_5))
+
+#Independence assumptions
+plot(residuals(model_5))
+
+
+```
+```{r, message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+#Multi-colinearlity
+vif(model_5)
+```
+
+```{r, message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+#Fit ridge regression
+x <- model.matrix(log(Income) ~ EducationGroup + Sex * Age, puma_data_2)[, -1]
+y <- log(puma_data_2$Income)
+
+ridge_model <- glmnet(x, y, alpha = 0)
+
+
+summary(ridge_model)
+
+#perform 10 fold cross-validation to find optimal lambda value
+cv_model <- cv.glmnet(x, y, alpha = 0)
+
+#find optimal lambda value that minimizes test MSE
+best_lambda <- cv_model$lambda.min
+best_lambda
+
+#produce plot of test MSE by lambda value
+plot(cv_model) 
+
+#The lambda value that minimizes the test MSE turns out to be 0.04258514
+
+#find coefficients of model with best lambda
+model_6 <- glmnet(x, y, alpha = 0, lambda = best_lambda)
+coef(model_6)
+
+#produce Ridge trace plot
+plot(ridge_model, xvar = "lambda")
+```
+The model that will be used to address the question:
+
+$$log(Income) = 9.436 + 0.379(HS, GED, or Associates Degree) + 1(Bachelors Degree) + 1.323(Masters Degree or higher) + 0.232(Male) + 0.002(Age) + 0.003(Male:Age)$$
+
+## Interpret the data
+
+To answer our question, does higher education mean higher income accounting for sex and age? Use the fitted model to compare the income across all 4 levels of education for a 50 years old (mean and median of the dataset) for males and females in Oregon.
+
+```{r, message=FALSE, echo=FALSE, results='hide', warning=FALSE}
+#Calculate median income for 50 YO males
+coef <- coef(model_6)
+lw_HS_m  <- coef[1, ] + coef[5, ] + (50*coef[6, ]) + (50*1*coef[7, ]) #lower than HS male
+GED_m    <- coef[1, ] + coef[2, ] + coef[5, ] + (50*coef[6, ]) + (50*1*coef[7, ]) #HS, GED, Associate degree male
+bach_m   <- coef[1, ] + coef[3, ] + coef[5, ] + (50*coef[6, ]) + (50*1*coef[7, ]) #Bachelor's degree male
+master_m <- coef[1, ] + coef[4, ] + coef[5, ] + (50*coef[6, ]) + (50*1*coef[7, ]) #master or higher male
+
+exp(lw_HS_m)
+exp(GED_m)
+exp(bach_m)
+exp(master_m)
+
+#Calculate median income for 50 YO females
+
+lw_HS_f  <- coef[1, ] + (50*coef[6, ]) #lower than HS female
+GED_f    <- coef[1, ] + coef[2, ] + (50*coef[6, ]) #HS, GED, Associate degree female
+bach_f   <- coef[1, ] + coef[3, ] + (50*coef[6, ]) #Bachelor's degree female
+master_f <- coef[1, ] + coef[4, ] + (50*coef[6, ]) #master or higher female
+
+exp(lw_HS_f)
+exp(GED_f)
+exp(bach_f)
+exp(master_f)
+```
+
+The median income for 50-year-old males in Oregon varies significantly across different educational categories. For individuals with less than a high school education, their income is \$21,273.80, slightly lower than those with a high school diploma, GED, or associate degree at \$31,089.90. Individuals with a bachelor's degree see a notable increase in an income to \$57,829.09 and $79,867.54 for those with a master's degree or higher.
+
+Similarly, for 50-year-old females in Oregon, a comparable pattern was observed. For individuals with less than a high school education, their income is \$14,136.47, slightly increasing for those with a high school diploma, GED, or associate degree to \$20,659.28. As observed in males, there is a significant increase in an income for females with a bachelor's degree, reaching $38,427.51, and continuing to rise with higher educational attainment to \$53,072.1 when they hold a master's degree or higher.
+
+There is a clear relationship between educational attainment and average income for both 50-year-old males and females in Oregon. Individuals with higher levels of education tend to have higher median incomes, with notable increases observed at certain educational milestones, such as obtaining bachelor's degree and above.
+
+
+### Second Question
+
+```{r}
+# Can we predict household income based on education, occupation, and race/ethnicity?
+head(puma_data_raw)
+```
+
+```{r}
+
+puma_data_q2 <- puma_data_raw |>
+  select(EducationGroup, Income, Race, OccupationGroup)
+head(puma_data_q2)
+```
+```{r}
+summary(puma_data_q2)
+```
+```{r}
+puma_data_q2_race_income <- puma_data_q2 |>
+  group_by(Race, Income) |>
+  summarise(n = n())
+
+ggplot(puma_data_q2_race_income, aes(x = Income)) +
+  geom_histogram(binwidth = 5000, fill = "skyblue", color = "black") +
+  facet_wrap(~Race) +
+  labs(title = "Distribution of Income by Race", x = "Income", y = "Frequency")
+```
+```{r}
+puma_data_q2_occ_income <- puma_data_q2 |>
+  group_by(OccupationGroup, Income) |>
+  summarise(n = n())
+
+ggplot(puma_data_q2_occ_income, aes(x = Income)) +
+  geom_histogram(binwidth = 5000, fill = "skyblue", color = "black") +
+  facet_wrap(~OccupationGroup) +
+  labs(title = "Distribution of Income by Occupation Group and Race", x = "Income", y = "Frequency")
+
+```
+
+### Third Question
+# Is there a relationship between Occupation, home ownership, race/ethnicity and Marial Status,  OccupationGroup, income?
+
+```{r}
+head(puma_data_raw)
+```
+
+
+```{r}
+puma_data_q3 <- puma_data_raw |>
+  select(Homeownership, Race, MaritalStatus, OccupationGroup, Occupation, Income)
+head(puma_data_q3)
+```
+```{r}
+puma_data_filtered <- puma_data_q3 |>
+  filter(Occupation != 0)
+
+
+ggplot(puma_data_filtered, aes(x = Occupation)) +
+  geom_bar(fill = "skyblue", color = "black") +
+  labs(title = "Distribution of Occupations", x = "Occupation", y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r}
+ggplot(puma_data_q3, aes(x = OccupationGroup, y = Occupation)) +
+  geom_bar(stat = "identity", fill = "skyblue", color = "black") +
+  labs(title = "The relationship between OccupationGroup and Occupation Size", x = "OccupationGroup", y = "Occupation Size") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+```
+```{r}
+ggplot(puma_data_q3, aes(x = Homeownership, y = Occupation)) +
+  geom_bar(stat = "identity", fill = "skyblue", color = "black") +
+  labs(title = "The relationship between Homeownership and Occupation Size", x = "Homeownership", y = "Occupation Size") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+```
+```{r}
+ggplot(puma_data_q3, aes(x = Race, fill = factor(Occupation))) +
+  geom_bar() +
+  labs(title = "Occupation vs. Homeownership by Race", x = "Race", y = "Count of Occupations") +
+  scale_fill_manual(values = c("White" = "blue", "Black" = "red")) +  # Customize colors for each race
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+```
+```{r}
+model_1_q3 <- lm(Occupation ~ as.factor(MaritalStatus) + as.factor(OccupationGroup) 
+      + as.factor(Homeownership) + as.factor(Race) + Income, data = puma_data_q3)
+
+
+
+```
+
+```{r}
+summary(model_1_q3)
+```
+
+```{r}
+model_2_q3 <- lm(Occupation ~ as.factor(MaritalStatus) + as.factor(OccupationGroup) 
+      + as.factor(Homeownership) + Income, data = puma_data_q3)
+```
+
+```{r}
+summary(model_2_q3)
+```
+```{r}
+#Compare models 1 and model 2
+anova(model_1_q3, model_2_q3)
+```
+Answer:
+From the result, we can see that Model 1 has a lower residual sum of squares 
+(RSS) compared to Model 2, indicating that it fits the data better.
+The F-statistic for the comparison between Model 1 and Model 2 is 5.4446, with 
+a very low p-value (6.915e-07), indicating that the additional predictors in 
+Model 1 significantly improve the fit of the model.
+Based on this information, we can conclude that Model 1 performs better than Model 2. 
+The additional predictors in Model 1 (Race) significantly improve the model's 
+ability to explain the variation in the occupation variable compared to Model 2.
+
+
+```{r}
+
+plot(fitted(model_1_q3), residuals(model_1_q3))
+
+
+qqnorm(residuals(model_1_q3))
+qqline(residuals(model_1_q3))
+
+
+plot(residuals(model_1_q3))
+
+#Fitted vs residuals plot exhibiting pattern
+```
+
+
+```{r}
+model_3_q3 <- lm(Occupation ~ as.factor(MaritalStatus) * as.factor(OccupationGroup) 
+      + as.factor(Homeownership) + as.factor(Race) + Income, data = puma_data_q3)
+
+```
+
+```{r}
+model_4_q3 <- lm(Occupation ~ as.factor(MaritalStatus) + as.factor(OccupationGroup) 
+      * as.factor(Homeownership) + as.factor(Race) + Income, data = puma_data_q3)
+```
+
+```{r}
+summary(model_3_q3)
+```
+
+```{r}
+summary(model_4_q3)
+```
+```{r}
+anova(model_3_q3, model_4_q3)
+```
+Model 3 has a lower residual sum of squares (RSS) compared to Model 4, indicating 
+a better fit to the data.
+Since Model 1 has a lower RSS with the same degrees of freedom as Model 2, we can 
+conclude that Model 3 performs better in terms of model fit.
+Therefore, based on the information provided, Model 3 is better than Model 4.
+
+```{r}
+plot(fitted(model_3_q3), residuals(model_3_q3))
+
+
+qqnorm(residuals(model_3_q3))
+qqline(residuals(model_3_q3))
+
+
+plot(residuals(model_3_q3))
+
+#Fitted vs residuals plot exhibiting pattern
+```
+
+
+
+## Appendix
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, results='hide', fig.show='hide'}
+## An if statement for checking if a package is installed :)
+#if(!require(somepackage)){
+#    install.packages("somepackage")
+#    library(somepackage)
+#}
+
+if (!require(tidycensus)) {
+  install.packages("tidycensus")
+}
+if (!require(tidyverse)) {
+  install.packages("tidyverse")
+}
+if (!require(dplyr)) {
+  install.packages("dplyr")
+}
+if (!require(ggplot2)) {
+  install.packages("ggplot2")
+}
+
+#Load libraries
+library(tidycensus)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+
+census_api_key("2547c95ce33b1ed0eec3aafd0fd8526a5bb9a22e")
+
+
+
+
+### Obtain the Data
+
+#Pull data set for specific variables
+puma_data <- get_pums(variables = c("AGEP","SCHL","PINCP", "SEX", "RAC1P", "TEN")
+                      ,state = "OR"
+                      ,year = 2022)
+
+#Rename the columns
+puma_data <- puma_data %>% rename(Age = AGEP,
+                                  EducationLevel = SCHL,
+                                  Income = PINCP,
+                                  Sex = SEX,
+                                  PersonNumber = SPORDER)
+head(puma_data[, 2:5])
+
+#Remove columns that are not needed
+puma_data <- puma_data %>% 
+  select(-ST, -SERIALNO, -WGTP, -PWGTP)
+head(puma_data)
+
+#Convert education levels
+puma_data <- puma_data %>%
+  mutate(
+    EducationLevel = case_when(
+      EducationLevel == "bb" ~ "00",
+      TRUE ~ EducationLevel
+    ),
+    EducationLevel = as.numeric(EducationLevel)
+  )
+
+#Make sure it is numeric
+class(puma_data$EducationLevel)
+
+##Group education level
+puma_data <- puma_data %>%
+  mutate(
+     EducationGroup = cut(EducationLevel, breaks = c(0, 2, 11, 16, 20, 21, 22, 24, Inf),
+                         labels = c("No schooling completed", "Less than High School",
+                                    "High School", "high school diploma or GED",
+                                    "Associates Degree", "Bachelors Degree",
+                                    "Masters Degree", "Doctorate Degree"),
+                         right = FALSE)
+  )
+unique(puma_data$EducationGroup)
+puma_data[1:50,]
+
+#Rearrange the columns
+puma_data <- puma_data %>%
+  select(EducationGroup, EducationLevel, Income, Age, Sex, PersonNumber)
+head(puma_data)
+
+#Drop age below 14
+puma_data <- puma_data %>%
+  filter(Age >= 14)
+head(puma_data[puma_data$Age < 14,])
+
+#Identify gender
+puma_data <- puma_data %>%
+  mutate(
+    Sex = case_when(
+      Sex == 1 ~ "Male",
+      Sex == 2 ~ "Female",
+      TRUE ~ as.character(Sex)
+    )
+)
+head(puma_data)
+
+
+
+
+
+### Explore the data
+#Summarizing the ranges of numerical 
+summary(puma_data$Age) #Range of Age
+summary(puma_data$Income) #Range of Age
+summary(puma_data$EducationNumber) #Range of Education
+table(puma_data$EducationLevel) #Count of each level of education
+
+#Plot inceom distribution
+ggplot(puma_data %>% filter(Income > 0), aes(Income)) +
+  geom_histogram(binwidth = 10000) +
+  scale_x_continuous(labels = function(x) paste0(x / 1000, "K")) +
+  labs(title = "Income Distribution in Oregon"
+       , x = "Income by $10k"
+       , y = "Count of Individuals") +
+  theme_minimal()
+##[Reference on Variables for now](https://usa.ipums.org/usa/resources/codebooks/DataDict1822.pdf)
+
+
+
+
+### Model the data
+
+#Drop zero income from the data set
+#Drop observation with 0 income (unemployed individuals)
+puma_data <- puma_data[puma_data$Income != 0, ]
+puma_data
+head(puma_data)
+
+# Does higher education mean higher income accounting for sex and age?
+model_1 <- lm(Income ~ EducationGroup + Sex + Age, data = puma_data)
+model_2 <- lm(Income ~ EducationGroup + Sex * Age, data = puma_data)
+model_3 <- lm(Income ~ EducationGroup * Sex + Age, data = puma_data)
+model_4 <- lm(Income ~ EducationGroup * Sex * Age, data = puma_data)
+
+#Compare model 3 and 4
+anova(model_3, model_4)
+
+#The full model provides a significantly better fit.
+
+#Compare model 2 and 4
+anova(model_2, model_4)
+
+#Model 4 is a better fit.
+
+#Compare model 1 and 4
+anova(model_1, model_4)
+
+
+##Check the assumption
+
+#Linearity and Homoscedasticity assumption
+plot(fitted(model_4), residuals(model_4))
+
+#Normality assumption
+qqnorm(residuals(model_4))
+qqline(residuals(model_4))
+
+#Independence assumptions
+plot(residuals(model_4))
+
+#Fitted vs residuals plot exhibiting pattern
+
+#Consider log transformation of the response variable:
+#Logged models
+model_5 <- lm(log(Income) ~ EducationGroup + Sex + Age, data = puma_data, na.action = na.exclude)
+model_6 <- lm(log(Income) ~ EducationGroup + Sex * Age, data = puma_data, na.action = na.exclude)
+model_7 <- lm(log(Income) ~ EducationGroup * Sex + Age, data = puma_data, na.action = na.exclude)
+model_8 <- lm(log(Income) ~ EducationGroup * Sex * Age, data = puma_data, na.action = na.exclude)
+
+#Compare models 7 and 8
+anova(model_7, model_8)
+
+#Compare models 6 and 8
+anova(model_6, model_8)
+
+#Compare models 5 and 8
+anova(model_5, model_8)
+
+#Model 8 is the best from 4 models
+
+
+#Check the assumption
+#Linear regression assumption
+plot(fitted(model_8), residuals(model_8))
+
+#Normality assumption
+qqnorm(residuals(model_8))
+qqline(residuals(model_8))
+
+#Use predict() to fit the regression and find the average income for 50 YO males
+new_data_1 <- data.frame(EducationGroup = c("No schooling completed","Less than High School", "High School", "high school diploma or GED","Associates Degree", "Bachelors Degree", "Masters Degree", "Doctorate Degree"),
+                       Sex = "Male",
+                       Age = 50)
+
+mu_1 <- predict(model_8, newdata = new_data_1 , type = "response")
+exp(mu_1)
+
+#Use predict() to fit the regression and find the average income for 50 YO femails
+new_data_2 <- data.frame(EducationGroup = c("No schooling completed","Less than High School", "High School", "high school diploma or GED","Associates Degree", "Bachelors Degree", "Masters Degree", "Doctorate Degree"),
+                       Sex = "Female",
+                       Age = 50)
+
+mu_2 <- predict(model_8, newdata = new_data_2 , type = "response")
+exp(mu_2)
+```
+
+

@@ -1,0 +1,335 @@
+---
+title: "Data Wizards (Group 4) Project 2"
+author:
+- Di Chen
+- Mai Castellano
+- Tyler Kussee
+- Spencer (Hutchison) Yang
+output: pdf_document
+geometry: margin=0.7in
+---
+\vspace{-5truemm}
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+##An if statement for checking if a package is installed 
+
+if (!require(tidycensus)) {
+  install.packages("tidycensus")
+}
+if (!require(tidyverse)) {
+  install.packages("tidyverse")
+}
+if (!require(dplyr)) {
+  install.packages("dplyr")
+}
+if (!require(ggplot2)) {
+  install.packages("ggplot2")
+}
+if (!require(caret)) {
+  install.packages("caret")
+}
+if (!require(xgboost)) {
+  install.packages("xgboost")
+}
+#if (!require(DiagrammeR)) {
+  #install.packages("htmltools")
+#}
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+#Load libraries
+library(tidycensus)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(xgboost)
+#library(DiagrammeR)
+```
+
+## Introduction
+
+In our pursuit of statistical inquiry, we have chosen to explore the Vehicle Loan Default dataset, comprising approximately 41 columns, with one designated as the response variable. Encompassing diverse information, the dataset delves into loan details, including date of birth, employment type, and credit score, alongside loan-related specifics such as disbursal details and loan-to-value ratios. The dataset presents challenges, notably in the form of odd date and time length columns, requiring standardization and transformation into comprehensible formats conducive to model development.
+
+We want to discover the most influential explanatory variables driving loan default, and their impact within the dataset. We also want to find the optimal modeling approach for harnessing the training data, evaluating various methodologies to identify the most effective. Ultimately, our investigation extends to which among them best identifies the underlying dynamics of vehicle loan default prediction.
+
+## Obtain/Scrub the data
+
+The data was pulled from the Vehicle Loan Default Prediction datasets available on Kaggle. As mentioned earlier, we have approximately 41 columns, with one of the columns designated as the response variable. First, we'll import the dataset from the training CSV:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+# Reading in the csv
+train <- read.csv('train.csv')
+train <- train %>% select(-"DISBURSAL_DATE")
+train$DATE_OF_BIRTH <- as.Date(train$DATE_OF_BIRTH, format = "%d-%m-%Y")
+train$AGE <- as.Date('01-01-2019', format = "%d-%m-%Y") - train$DATE_OF_BIRTH
+train$AGE <- as.integer(floor(train$AGE / 365.25))
+train <- train %>% select(-"DATE_OF_BIRTH", -"PERFORM_CNS_SCORE_DESCRIPTION")
+```
+
+We then scrub the unknown values in our length and age fields:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+# Calculate strange data fields
+train$acctyr <- as.numeric(gsub("yrs.*", "", train$AVERAGE_ACCT_AGE))
+train$acctmo <- as.numeric(gsub(".*yrs|mon", "", train$AVERAGE_ACCT_AGE))
+train$crdtyr <- as.numeric(gsub("yrs.*", "", train$CREDIT_HISTORY_LENGTH))
+train$crdtmo <- as.numeric(gsub(".*yrs|mon", "", train$CREDIT_HISTORY_LENGTH))
+```
+
+Then we do our calculations and create various other fields for our modeling usage:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+# Replace strange data fields
+train$AVERAGE_ACCT_AGE <- round(train$acctyr + train$acctmo / 12, 2)
+train$CREDIT_HISTORY_LENGTH <- round(train$crdtyr + train$crdtmo / 12, 2)
+# Remove calc fields
+train <- train %>% select(-acctyr, -acctmo, -crdtyr, -crdtmo)
+# Create emloyment dummy fields
+train$SELF_EMPLOYED <- ifelse(train$EMPLOYMENT_TYPE == "Self employed", 1, 0)
+train$SALARIED <- ifelse(train$EMPLOYMENT_TYPE == "Salaried", 1, 0)
+train$NULL_EMPLOYMENT <- ifelse(is.na(train$EMPLOYMENT_TYPE), 1, 0)
+# Remove employment_type
+train <- train %>% select(-EMPLOYMENT_TYPE)
+# Pull CNS score letter grade, removed to use XGBoost for now since it only takes integer/numbers
+#train$PERFORM_CNS_SCORE_DESCRIPTION <- as.factor(substr(train$PERFORM_CNS_SCORE_DESCRIPTION,
+
+# Remove rows with any null values
+train <- train[complete.cases(train), ]
+
+# Remove duplicate rows
+train <- train[!duplicated(train), ]
+
+# converting Loan Default to a factor for binary classification
+tempTrain <- train
+tempTrain$LOAN_DEFAULT <- as.factor(train$LOAN_DEFAULT)
+```
+
+
+
+
+Now that we've combed through our dataset, we can now going through our dataset to extract our features and learn the optimal model for classification.
+
+## Explore the data
+
+So in the case of this dataset, we need to find the features that have the biggest impact on our "LOAN_DEFAULT" variable. In order to find this, we will be using the XGBoost machine learning algorithm package to train our matrix and label vector from the training data, setting the parameters, and performing cross-validation to find the optimal number of rounds for training the model.
+Once the parameters and optimal number of rounds were found, we trained the model and then proceeded to calculate the feature importance scores. From there, we select the top 10 features based on their importance to the model, along with plotting the scores to visualize the relative importance of each feature. With these scores and our graph, we found the following features to be the most important:
+
+* LTV                   
+* CURRENT_PINCODE_ID    
+* PERFORM_CNS_SCORE    
+* UNIQUEID              
+* DISBURSED_AMOUNT      
+* STATE_ID             
+* SUPPLIER_ID           
+* PRI_SANCTIONED_AMOUNT 
+* AGE                  
+* EMPLOYEE_CODE_ID 
+
+First, we want to check the correlations between different variables.
+
+```{r}
+colnames(tempTrain)
+```
+```{r}
+# Convert all columns to numeric
+tempTrain[] <- lapply(tempTrain, as.numeric)
+
+# Check the structure of the 'train' dataset to verify numeric conversion
+str(tempTrain)
+```
+```{r}
+# Check for NaN or infinite values in the correlation matrix and replace with 0
+correlation_matrix <- cor(tempTrain)
+correlation_matrix <- as.matrix(correlation_matrix)
+correlation_matrix[is.nan(correlation_matrix) | is.infinite(correlation_matrix)] <- 0
+
+# Plot correlation matrix directly without clustering with variable labels
+image(1:nrow(correlation_matrix), 1:ncol(correlation_matrix), correlation_matrix,
+      main = "Correlation Matrix Heatmap",
+      xlab = "",
+      ylab = "",
+      col = colorRampPalette(c("blue", "white", "red"))(100),
+      axes = FALSE)
+
+# Add labels to the axes with smaller font size and remove numbers
+axis(1, at = 1:ncol(correlation_matrix), labels = colnames(correlation_matrix), las = 2, cex.axis = 0.5, tck = 0)
+axis(2, at = 1:nrow(correlation_matrix), labels = rownames(correlation_matrix), las = 2, cex.axis = 0.5, tck = 0)
+```
+
+
+
+With all of this in mind, we're able to now subset the training dataset with these important features, and split it into new training and testing datasets. we can start building our classifiers and getting results.
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+featureMatrix <- as.matrix(train[, -which(names(train) == "LOAN_DEFAULT")])
+labelVector <- as.numeric(as.character(train$LOAN_DEFAULT))
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+# Set the parameters
+params <- list(
+  objective = "binary:logistic",
+  eval_metric = "logloss",
+  max_depth = 6,
+  eta = 0.1,
+  nthread = 2,
+  subsample = 0.8,
+  colsample_bytree = 0.8
+)
+
+# Cross-validation for rounds
+cvResults <- xgb.cv(
+  params = params,
+  data = featureMatrix,
+  label = labelVector,
+  nfold = 5,
+  nrounds = 100,
+  early_stopping_rounds = 10,
+  verbose = FALSE
+)
+
+# Train the XGBoost model
+xgbModel <- xgboost(
+  params = params,
+  data = featureMatrix,
+  label = labelVector,
+  nrounds = cvResults$best_iteration
+)
+
+# Select the top features
+importanceMatrix <- xgb.importance(model = xgbModel)
+topFeatures <- importanceMatrix$Feature[1:10]
+print(topFeatures)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+#Modelling the features importance
+importanceMatrix <- xgb.importance(model = xgbModel)
+xgb.plot.importance(importanceMatrix)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+# Subset the dataset with the selected features
+filteredData <- train[, c(topFeatures, "LOAN_DEFAULT")]
+
+# Training/Testing split
+trainIndex <- createDataPartition(filteredData$LOAN_DEFAULT, p = 0.8, list = FALSE)
+trainData <- filteredData[trainIndex, ]
+testData <- filteredData[-trainIndex, ]
+```
+
+
+## Model the data
+
+```{r}
+head(trainData)
+```
+
+We want to take a look the logistic regression model first and check the model accuracy.
+
+```{r}
+
+logistic_model <- glm(LOAN_DEFAULT ~ ., data = trainData, family = binomial)
+
+```
+
+```{r}
+# Predictions
+y_pred <- predict(logistic_model, newdata = testData, type = "response")
+y_pred_class <- ifelse(y_pred > 0.5, 1, 0)
+
+# Model evaluation
+accuracy <- mean(y_pred_class == testData$LOAN_DEFAULT)
+confusion_matrix <- table(testData$LOAN_DEFAULT, y_pred_class)
+precision <- confusion_matrix[2,2] / sum(confusion_matrix[,2])
+recall <- confusion_matrix[2,2] / sum(confusion_matrix[2,])
+
+print(paste("Accuracy:", accuracy))
+print(paste("Precision:", precision))
+print(paste("Recall:", recall))
+
+```
+```{r}
+library(e1071)
+```
+
+
+
+
+
+
+## Interpret the data
+
+## Obstacles
+
+Initially, we allocated individual tasks to each team member and emphasized 
+focusing on their assigned responsibilities. However, we noticed variations 
+in the approach to problem-solving among team members. During collaboration on 
+this project using Git, conflicts arose when pushing changes to the main branch. 
+Subsequently, we reached an agreement stipulating that each team member must have 
+their changes reviewed and approved by the next person before merging them into 
+the main branch.
+
+
+
+## Conclusion
+
+## Appendix
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+featureMatrix <- as.matrix(train[, -which(names(train) == "LOAN_DEFAULT")])
+labelVector <- as.numeric(as.character(train$LOAN_DEFAULT))
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+# Set the parameters
+params <- list(
+  objective = "binary:logistic",
+  eval_metric = "logloss",
+  max_depth = 6,
+  eta = 0.1,
+  nthread = 2,
+  subsample = 0.8,
+  colsample_bytree = 0.8
+)
+
+# Cross-validation for rounds
+cvResults <- xgb.cv(
+  params = params,
+  data = featureMatrix,
+  label = labelVector,
+  nfold = 5,
+  nrounds = 100,
+  early_stopping_rounds = 10,
+  verbose = FALSE
+)
+
+# Train the XGBoost model
+xgbModel <- xgboost(
+  params = params,
+  data = featureMatrix,
+  label = labelVector,
+  nrounds = cvResults$best_iteration
+)
+
+# Select the top features
+importanceMatrix <- xgb.importance(model = xgbModel)
+topFeatures <- importanceMatrix$Feature[1:10]
+head(topFeatures)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+#Modelling the features importance
+importanceMatrix <- xgb.importance(model = xgbModel)
+xgb.plot.importance(importanceMatrix)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+# Subset the dataset with the selected features
+filteredData <- train[, c(topFeatures, "LOAN_DEFAULT")]
+
+# Split the selected data into training and testing sets
+trainIndex <- createDataPartition(filteredData$LOAN_DEFAULT, p = 0.8, list = FALSE)
+trainData <- filteredData[trainIndex, ]
+testData <- filteredData[-trainIndex, ]
+```
