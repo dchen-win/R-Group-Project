@@ -1,7 +1,4 @@
----
-title: "README: PUMA Data Analysis"
-output: github_document
----
+
 Group project 1:
 📈 Data Analysis: Income, Education, Occupation & Demographics  
 Authors: 
